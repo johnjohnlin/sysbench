@@ -83,7 +83,7 @@ static sb_test_t memory_test =
 /* A struct that aligns to cache lines */
 struct Node {
   union {
-    Node *next;
+    struct Node *next;
     char padding[64];
   };
 };
@@ -123,6 +123,22 @@ int memory_init(void)
   char         *s;
   size_t       *buffer;
 
+  s = sb_get_value_string("memory-oper");
+  if (!strcmp(s, "write"))
+    memory_oper = SB_MEM_OP_WRITE;
+  else if (!strcmp(s, "read"))
+    memory_oper = SB_MEM_OP_READ;
+  else if (!strcmp(s, "latency"))
+    memory_oper = SB_MEM_OP_LATENCY;
+  else if (!strcmp(s, "none"))
+    memory_oper = SB_MEM_OP_NONE;
+  else
+  {
+    log_text(LOG_FATAL, "Invalid value for memory-oper: %s", s);
+    return 1;
+  }
+
+
   memory_block_size = sb_get_value_size("memory-block-size");
   if (memory_oper != SB_MEM_OP_LATENCY && memory_block_size < SIZEOF_SIZE_T ||
       memory_oper == SB_MEM_OP_LATENCY && memory_block_size < 64 ||
@@ -154,21 +170,6 @@ int memory_init(void)
     memory_hugetlb = sb_get_value_flag("memory-hugetlb");
 #endif  
 
-  s = sb_get_value_string("memory-oper");
-  if (!strcmp(s, "write"))
-    memory_oper = SB_MEM_OP_WRITE;
-  else if (!strcmp(s, "read"))
-    memory_oper = SB_MEM_OP_READ;
-  else if (!strcmp(s, "latency"))
-    memory_oper = SB_MEM_OP_LATENCY;
-  else if (!strcmp(s, "none"))
-    memory_oper = SB_MEM_OP_NONE;
-  else
-  {
-    log_text(LOG_FATAL, "Invalid value for memory-oper: %s", s);
-    return 1;
-  }
-
   s = sb_get_value_string("memory-access-mode");
   if (!strcmp(s, "seq"))
     memory_access_rnd = 0;
@@ -198,13 +199,13 @@ int memory_init(void)
     if (memory_oper == SB_MEM_OP_LATENCY)
     {
       /* Generate a random circle link list */
-      Node *nodes = buffer;
+      struct Node *nodes = buffer;
       nodes[0].next = nodes;
       for (int i = 1; i < max_offset; ++i)
       {
-        Node *cur = nodes + sb_rand_default(0, i);
-        Node *nxt = cur->next;
-        Node *tail = nodes + i;
+        struct Node *cur = nodes + sb_rand_default(0, i);
+        struct Node *nxt = cur->next;
+        struct Node *tail = nodes + i;
         cur->next = tail;
         tail->next = nxt;
       }
@@ -245,8 +246,9 @@ int memory_init(void)
       memset(buffers[i], 0, memory_block_size);
     }
 
+    const ssize_t one_pass = memory_oper == SB_MEM_OP_LATENCY ? (((ssize_t)1)<<20) : memory_block_size;
     thread_counters[i] =
-      memory_total_size / memory_block_size / sb_globals.threads;
+      memory_total_size / one_pass / sb_globals.threads;
   }
 
   switch (memory_oper) {
@@ -266,8 +268,9 @@ int memory_init(void)
     break;
 
   case SB_MEM_OP_LATENCY:
-    if (sb_globals.threads != 1 || memory_scope == SB_MEM_SCOPE_GLOBAL) {
+    if (sb_globals.threads != 1 || memory_scope != SB_MEM_SCOPE_GLOBAL) {
       log_text(LOG_FATAL, "Memory latency accepts only --memory-scope=global and --threads=1!", i);
+      return 1;
     }
     memory_test.ops.execute_event = event_latency;
     break;
@@ -404,7 +407,20 @@ int event_latency(sb_event_t *req, int tid)
 {
   (void) req; /* unused */
   (void) tid; /* unused */
-  Node *nodes = buffer;
+  struct Node *nodes = buffers[0];
+  /* totally 1M times */
+  for (size_t i = 0; i < (1<<17); ++i)
+  {
+    nodes = nodes->next;
+    nodes = nodes->next;
+    nodes = nodes->next;
+    nodes = nodes->next;
+    nodes = nodes->next;
+    nodes = nodes->next;
+    nodes = nodes->next;
+    nodes = nodes->next;
+  }
+  struct Node dummy = *(volatile struct Node*)nodes;
   return 0;
 }
 
@@ -479,7 +495,8 @@ void memory_report_cumulative(sb_stat_t *stat)
 
   if (memory_oper == SB_MEM_OP_LATENCY)
   {
-    log_text(LOG_NOTICE, "Hi\n");
+    const double unit = 1e9 / (1<<20); // convert second to nanosecond + events to operation count
+    log_text(LOG_NOTICE, "Memory latency %5.2f ns\n", stat->time_interval / stat->events * unit);
   }
   else if (memory_oper != SB_MEM_OP_NONE)
   {
